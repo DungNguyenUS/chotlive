@@ -448,13 +448,14 @@ def get_shop_meta_oauth_url(
                 "mua app chỉ cần bấm nút này 1 lần là tự động kết nối Fanpage!"
             ),
         )
-    scopes = ",".join(sorted(list(REQUIRED_PAGE_PERMISSIONS)))
+    scopes = ",".join(sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata"})))
     url = (
         f"https://www.facebook.com/{settings.META_API_VERSION}/dialog/oauth"
         f"?client_id={settings.META_APP_ID}"
         f"&redirect_uri={settings.META_REDIRECT_URI}"
         f"&state={shop.id}"
         f"&scope={scopes}"
+        f"&auth_type=rerequest"
     )
     return {"oauth_url": url}
 
@@ -553,6 +554,9 @@ def handle_meta_oauth_callback(
                 except Exception:
                     pass
             db.commit()
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}?meta_oauth=success&pages_count={len(pages_data)}"
+            )
     except Exception:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}?meta_oauth=network_error")
 

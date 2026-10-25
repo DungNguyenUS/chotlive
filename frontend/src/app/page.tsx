@@ -115,6 +115,24 @@ export default function ChotLiveApp() {
     if (savedToken) {
       setToken(savedToken);
     }
+    const urlParams = new URLSearchParams(window.location.search);
+    const oauthStatus = urlParams.get("meta_oauth");
+    const pagesCount = urlParams.get("pages_count");
+    if (oauthStatus) {
+      setActiveTab("sessions");
+      if (oauthStatus === "success") {
+        if (pagesCount === "0") {
+          notify(
+            "Đã đăng nhập FB nhưng chưa nhận được Fanpage! Hãy kiểm tra mục 'Chỉnh sửa quyền / Chọn Trang' trên cửa sổ Facebook hoặc cấp quyền pages_show_list trong Facebook Login for Business."
+          );
+        } else {
+          notify(`🎉 Đã kết nối thành công ${pagesCount || ""} Fanpage từ Facebook!`);
+        }
+      } else {
+        notify(`Kết nối Facebook chưa hoàn tất (${oauthStatus}).`);
+      }
+      window.history.replaceState({}, "", window.location.pathname);
+    }
   }, []);
 
   const loadInitialWorkspace = useCallback(async (jwt: string) => {
