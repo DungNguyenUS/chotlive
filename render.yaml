@@ -1,0 +1,36 @@
+databases:
+  - name: chotlive-postgres
+    plan: free
+    databaseName: chotlive_db
+    user: chotlive_user
+
+services:
+  - type: web
+    name: chotlive-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt && alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: APP_ENV
+        value: development
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chotlive-postgres
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: META_APP_ID
+        value: "2057934084854927"
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        value: "chotlive_verify_2026"
+      - key: FRONTEND_URL
+        value: "https://chotlive.vercel.app"
+      - key: CORS_ORIGINS
+        value: "https://chotlive.vercel.app,http://localhost:3000"

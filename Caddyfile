@@ -1,0 +1,16 @@
+# Caddyfile - Tự động cấp chứng chỉ HTTPS (Let's Encrypt) miễn phí trên VPS
+# Chỉ cần sửa biến DOMAIN trong file .env (ví dụ: DOMAIN=chotlive.vn)
+
+{$DOMAIN:localhost} {
+    encode gzip
+
+    # Mọi request tới /api/v1/* (bao gồm Meta OAuth & Meta Webhooks) đi thẳng vào Backend FastAPI
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    # Toàn bộ giao diện web đi vào Frontend Next.js
+    handle {
+        reverse_proxy frontend:3000
+    }
+}
