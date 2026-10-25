@@ -30,7 +30,11 @@ services:
         sync: false
       - key: META_WEBHOOK_VERIFY_TOKEN
         value: "chotlive_verify_2026"
+      - key: APP_URL
+        value: "https://chotlive-api.onrender.com"
+      - key: META_REDIRECT_URI
+        value: "https://chotlive-api.onrender.com/api/v1/meta/oauth/callback"
       - key: FRONTEND_URL
-        value: "https://chotlive.vercel.app"
+        value: "https://chotlive-tau.vercel.app"
       - key: CORS_ORIGINS
-        value: "https://chotlive.vercel.app,http://localhost:3000"
+        value: "https://chotlive-tau.vercel.app,http://localhost:3000"
