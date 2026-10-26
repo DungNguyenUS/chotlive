@@ -130,6 +130,22 @@ def parse_livestream_comment(
 
     candidate_codes = matched_catalog_codes if matched_catalog_codes else regex_candidates
 
+    # 1b. If customer wrote product name instead of code (e.g. "chốt 2 áo size M"), match against product names
+    if not candidate_codes and active_products:
+        for p in active_products:
+            if not p.is_active or not p.name:
+                continue
+            pname_lower = p.name.strip().lower()
+            if pname_lower and pname_lower in lower:
+                candidate_codes.append(p.code.upper())
+        if not candidate_codes:
+            for p in active_products:
+                if not p.is_active or not p.name:
+                    continue
+                words = [w for w in re.split(r"\s+", p.name.strip().lower()) if len(w) >= 2]
+                if any(re.search(rf"\b{re.escape(w)}\b", lower) for w in words):
+                    candidate_codes.append(p.code.upper())
+
     # 2. Extract color
     detected_color: Optional[str] = None
     color_explicit = re.search(

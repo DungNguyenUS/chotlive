@@ -256,14 +256,34 @@ export default function ChotLiveApp() {
   useEffect(() => {
     if (token && activeShop) {
       loadShopData();
-      const timer = setInterval(() => {
+      const timer = setInterval(async () => {
         if (activeTab === "comments" || activeTab === "orders") {
+          const hasFbPage = connectedAccounts.some(
+            (a: any) => a.platform === "FACEBOOK_PAGE"
+          );
+          if (hasFbPage) {
+            try {
+              const sid = manualSessionId || "auto";
+              const syncRes = await apiFetch(
+                `/shops/${activeShop.id}/live-sessions/${sid}/sync-facebook-comments`,
+                { method: "POST" },
+                token
+              );
+              if (syncRes?.new_comments_ingested > 0) {
+                notify(
+                  `🔔 Có ${syncRes.new_comments_ingested} bình luận mới từ Facebook vừa đổ về!`
+                );
+              }
+            } catch {
+              // Ignore background sync errors
+            }
+          }
           loadShopData();
         }
-      }, 4000);
+      }, 5000);
       return () => clearInterval(timer);
     }
-  }, [token, activeShop, activeTab, loadShopData]);
+  }, [token, activeShop, activeTab, connectedAccounts, manualSessionId, loadShopData]);
 
   // Handlers
   const handleAuthSubmit = async (e: React.FormEvent) => {
@@ -524,12 +544,13 @@ export default function ChotLiveApp() {
     }
   };
 
-  const handleSyncFacebookComments = async (sessionId: string) => {
-    if (!token || !activeShop || !sessionId) return;
+  const handleSyncFacebookComments = async (sessionId?: string) => {
+    if (!token || !activeShop) return;
+    const targetSessionId = sessionId || manualSessionId || "auto";
     setIsSyncingComments(true);
     try {
       const res = await apiFetch(
-        `/shops/${activeShop.id}/live-sessions/${sessionId}/sync-facebook-comments`,
+        `/shops/${activeShop.id}/live-sessions/${targetSessionId}/sync-facebook-comments`,
         { method: "POST" },
         token
       );
@@ -1066,8 +1087,8 @@ export default function ChotLiveApp() {
               </button>
               <button
                 type="button"
-                disabled={isSyncingComments || !manualSessionId}
-                onClick={() => handleSyncFacebookComments(manualSessionId)}
+                disabled={isSyncingComments}
+                onClick={() => handleSyncFacebookComments(manualSessionId || "auto")}
                 className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold whitespace-nowrap"
               >
                 {isSyncingComments ? "⏳ Đang quét FB..." : "🔄 Quét Comment FB Thật"}

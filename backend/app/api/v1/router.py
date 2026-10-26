@@ -700,6 +700,27 @@ def list_live_sessions(
         .order_by(LiveSession.started_at.desc())
         .all()
     )
+    if not sessions:
+        first_acc = (
+            db.query(ConnectedAccount)
+            .filter(ConnectedAccount.shop_id == shop_id)
+            .order_by(ConnectedAccount.updated_at.desc())
+            .first()
+        )
+        if first_acc:
+            auto_sess = LiveSession(
+                shop_id=shop_id,
+                connected_account_id=first_acc.id,
+                external_video_id=f"live_{uuid.uuid4().hex[:8]}",
+                title=f"Live {first_acc.name}",
+                source_type=first_acc.platform,
+                connection_mode=first_acc.connection_status,
+                status=LiveSessionStatus.LIVE.value,
+            )
+            db.add(auto_sess)
+            db.commit()
+            db.refresh(auto_sess)
+            sessions = [auto_sess]
     return [LiveSessionResponse.model_validate(s) for s in sessions]
 
 
@@ -783,53 +804,60 @@ def sync_facebook_comments_from_graph_api(
     """
     Directly polls Meta Graph API (`GET /{external_video_id}/comments`) using the connected
     Fanpage's encrypted Page Access Token so the shop owner can test a real Facebook Page
-    live video / post immediately on localhost without needing a public HTTPS webhook tunnel.
-    Ref: https://developers.facebook.com/docs/live-video-api/guides/Reading-Comments/
+    live video / post immediately without needing manual session setup.
     """
     import httpx
     from app.core.security import decrypt_secret
 
     shop, _ = get_shop_access(shop_id, current_user, db)
+
+    conn_acc = (
+        db.query(ConnectedAccount)
+        .filter(
+            ConnectedAccount.shop_id == shop.id,
+            ConnectedAccount.platform == SourcePlatform.FACEBOOK_PAGE.value,
+        )
+        .order_by(ConnectedAccount.updated_at.desc())
+        .first()
+    )
+    if not conn_acc or not conn_acc.encrypted_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Chưa có Fanpage nào được kết nối. Vui lòng bấm Kết Nối Nhanh Facebook ở mục Nguồn Kết Nối.",
+        )
+
     live_session = (
         db.query(LiveSession)
         .filter(LiveSession.id == session_id, LiveSession.shop_id == shop.id)
         .first()
+        if session_id != "auto"
+        else None
     )
     if not live_session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phiên live.")
-
-    if not live_session.external_video_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Phiên live này chưa có ID Video / Bài viết Facebook (external_video_id).",
-        )
-
-    conn_acc = None
-    if live_session.connected_account_id:
-        conn_acc = (
-            db.query(ConnectedAccount)
-            .filter(
-                ConnectedAccount.id == live_session.connected_account_id,
-                ConnectedAccount.shop_id == shop.id,
-            )
+        live_session = (
+            db.query(LiveSession)
+            .filter(LiveSession.shop_id == shop.id)
+            .order_by(LiveSession.started_at.desc())
             .first()
         )
-    if not conn_acc:
-        conn_acc = (
-            db.query(ConnectedAccount)
-            .filter(
-                ConnectedAccount.shop_id == shop.id,
-                ConnectedAccount.platform == SourcePlatform.FACEBOOK_PAGE.value,
-            )
-            .order_by(ConnectedAccount.updated_at.desc())
-            .first()
+    if not live_session:
+        live_session = LiveSession(
+            shop_id=shop.id,
+            connected_account_id=conn_acc.id,
+            external_video_id=f"live_{uuid.uuid4().hex[:8]}",
+            title=f"Live {conn_acc.name}",
+            source_type=SourcePlatform.FACEBOOK_PAGE.value,
+            connection_mode=conn_acc.connection_status,
+            status=LiveSessionStatus.LIVE.value,
         )
-
-    if not conn_acc or not conn_acc.encrypted_access_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Chưa có Fanpage nào được gắn Page Access Token. Vui lòng nhập Page Access Token ở mục Nguồn Kết Nối.",
-        )
+        db.add(live_session)
+        db.flush()
+    else:
+        # Ensure session is linked to the real connected Fanpage if it was previously created as DEMO
+        if live_session.source_type == SourcePlatform.DEMO.value or not live_session.connected_account_id:
+            live_session.source_type = SourcePlatform.FACEBOOK_PAGE.value
+            live_session.connected_account_id = conn_acc.id
+            live_session.connection_mode = conn_acc.connection_status
 
     access_token = decrypt_secret(conn_acc.encrypted_access_token)
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -839,10 +867,16 @@ def sync_facebook_comments_from_graph_api(
     if live_session.external_video_id and not live_session.external_video_id.startswith("live_"):
         target_object_ids.append(live_session.external_video_id)
 
-    params = {
+    params_with_from = {
         "order": "reverse_chronological",
         "filter": "stream",
-        "fields": "id,message,created_time,from{id,name,picture}",
+        "fields": "id,message,created_time,from",
+        "limit": 50,
+    }
+    params_fallback = {
+        "order": "reverse_chronological",
+        "filter": "stream",
+        "fields": "id,message,created_time",
         "limit": 50,
     }
 
@@ -862,17 +896,18 @@ def sync_facebook_comments_from_graph_api(
                     if lv_id and lv_id not in target_object_ids:
                         target_object_ids.insert(0, lv_id)
 
-            # 2. Also include the latest 3 posts on the Page's feed (regular posts / videos)
-            feed_resp = client.get(
-                f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/feed",
-                params={"fields": "id,message", "limit": 3},
-                headers=headers,
-            )
-            if feed_resp.status_code == 200 and feed_resp.json().get("data"):
-                for post in feed_resp.json()["data"]:
-                    post_id = str(post.get("id", "")).strip()
-                    if post_id and post_id not in target_object_ids:
-                        target_object_ids.append(post_id)
+            # 2. Check both /posts and /feed on the Page (latest 5 posts)
+            for edge in ("posts", "feed"):
+                feed_resp = client.get(
+                    f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/{edge}",
+                    params={"fields": "id,message", "limit": 5},
+                    headers=headers,
+                )
+                if feed_resp.status_code == 200 and feed_resp.json().get("data"):
+                    for post in feed_resp.json()["data"]:
+                        post_id = str(post.get("id", "")).strip()
+                        if post_id and post_id not in target_object_ids:
+                            target_object_ids.append(post_id)
 
             if target_object_ids and (
                 not live_session.external_video_id or live_session.external_video_id.startswith("live_")
@@ -883,7 +918,9 @@ def sync_facebook_comments_from_graph_api(
             seen_comment_ids = set()
             for obj_id in target_object_ids:
                 url = f"https://graph.facebook.com/{settings.META_API_VERSION}/{obj_id}/comments"
-                resp = client.get(url, params=params, headers=headers)
+                resp = client.get(url, params=params_with_from, headers=headers)
+                if resp.status_code != 200:
+                    resp = client.get(url, params=params_fallback, headers=headers)
                 if resp.status_code == 200:
                     for c_item in resp.json().get("data", []):
                         c_id = str(c_item.get("id", "")).strip()
