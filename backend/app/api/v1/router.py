@@ -834,34 +834,11 @@ def sync_facebook_comments_from_graph_api(
     access_token = decrypt_secret(conn_acc.encrypted_access_token)
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Auto-discover active Live Video or latest Page post if external_video_id is generic/auto
-    target_object_id = live_session.external_video_id
-    if not target_object_id or target_object_id.startswith("live_"):
-        try:
-            with httpx.Client(timeout=12.0) as client:
-                # 1. Check active LIVE videos on the Page first
-                lv_resp = client.get(
-                    f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/live_videos",
-                    params={"broadcast_status": '["LIVE"]', "fields": "id,title", "limit": 1},
-                    headers=headers,
-                )
-                if lv_resp.status_code == 200 and lv_resp.json().get("data"):
-                    target_object_id = str(lv_resp.json()["data"][0]["id"])
-                    live_session.external_video_id = target_object_id
-                else:
-                    # 2. Fallback to the latest post/video on the Page's feed
-                    feed_resp = client.get(
-                        f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/feed",
-                        params={"fields": "id,message", "limit": 1},
-                        headers=headers,
-                    )
-                    if feed_resp.status_code == 200 and feed_resp.json().get("data"):
-                        target_object_id = str(feed_resp.json()["data"][0]["id"])
-                        live_session.external_video_id = target_object_id
-        except Exception:
-            pass
+    # Auto-discover active Live Videos AND latest Page posts so commenting on ANY recent post or live stream works seamlessly
+    target_object_ids: List[str] = []
+    if live_session.external_video_id and not live_session.external_video_id.startswith("live_"):
+        target_object_ids.append(live_session.external_video_id)
 
-    url = f"https://graph.facebook.com/{settings.META_API_VERSION}/{target_object_id}/comments"
     params = {
         "order": "reverse_chronological",
         "filter": "stream",
@@ -869,26 +846,65 @@ def sync_facebook_comments_from_graph_api(
         "limit": 50,
     }
 
+    items: List[dict] = []
+    last_err_msg: Optional[str] = None
     try:
-        with httpx.Client(timeout=12.0) as client:
-            resp = client.get(url, params=params, headers=headers)
+        with httpx.Client(timeout=15.0) as client:
+            # 1. Check active LIVE videos on the Page
+            lv_resp = client.get(
+                f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/live_videos",
+                params={"broadcast_status": '["LIVE"]', "fields": "id,title", "limit": 2},
+                headers=headers,
+            )
+            if lv_resp.status_code == 200 and lv_resp.json().get("data"):
+                for lv in lv_resp.json()["data"]:
+                    lv_id = str(lv.get("id", "")).strip()
+                    if lv_id and lv_id not in target_object_ids:
+                        target_object_ids.insert(0, lv_id)
+
+            # 2. Also include the latest 3 posts on the Page's feed (regular posts / videos)
+            feed_resp = client.get(
+                f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/feed",
+                params={"fields": "id,message", "limit": 3},
+                headers=headers,
+            )
+            if feed_resp.status_code == 200 and feed_resp.json().get("data"):
+                for post in feed_resp.json()["data"]:
+                    post_id = str(post.get("id", "")).strip()
+                    if post_id and post_id not in target_object_ids:
+                        target_object_ids.append(post_id)
+
+            if target_object_ids and (
+                not live_session.external_video_id or live_session.external_video_id.startswith("live_")
+            ):
+                live_session.external_video_id = target_object_ids[0]
+
+            # 3. Fetch comments from discovered posts/live videos
+            seen_comment_ids = set()
+            for obj_id in target_object_ids:
+                url = f"https://graph.facebook.com/{settings.META_API_VERSION}/{obj_id}/comments"
+                resp = client.get(url, params=params, headers=headers)
+                if resp.status_code == 200:
+                    for c_item in resp.json().get("data", []):
+                        c_id = str(c_item.get("id", "")).strip()
+                        if c_id and c_id not in seen_comment_ids:
+                            seen_comment_ids.add(c_id)
+                            items.append(c_item)
+                else:
+                    try:
+                        err_data = resp.json().get("error", {})
+                        if err_data.get("message"):
+                            last_err_msg = f"Lỗi từ Facebook ({err_data.get('code')}): {err_data.get('message')}"
+                    except Exception:
+                        last_err_msg = f"Meta Graph API trả về HTTP {resp.status_code}"
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Không thể kết nối tới Meta Graph API: {type(exc).__name__}",
         )
 
-    if resp.status_code != 200:
-        err_msg = f"Meta Graph API trả về HTTP {resp.status_code}"
-        try:
-            err_data = resp.json().get("error", {})
-            if err_data.get("message"):
-                err_msg = f"Lỗi từ Facebook ({err_data.get('code')}): {err_data.get('message')}"
-        except Exception:
-            pass
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_msg)
-
-    items = resp.json().get("data", [])
+    if not items and last_err_msg and not target_object_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=last_err_msg)
     ingested_count = 0
     for item in items:
         cid = str(item.get("id", "")).strip()
