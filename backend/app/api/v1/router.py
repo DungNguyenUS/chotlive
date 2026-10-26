@@ -532,16 +532,38 @@ def handle_meta_oauth_callback(
                     existing.granted_permissions = perms_str
                     existing.missing_permissions = None
                     existing.last_error = None
+                    acc_obj = existing
                 else:
+                    acc_obj = ConnectedAccount(
+                        shop_id=shop.id,
+                        platform=SourcePlatform.FACEBOOK_PAGE.value,
+                        external_id=pid,
+                        name=pname,
+                        encrypted_access_token=encrypted_tok,
+                        connection_status=ConnectionStatus.CONNECTED.value,
+                        granted_permissions=perms_str,
+                    )
+                    db.add(acc_obj)
+                db.flush()
+
+                existing_session = (
+                    db.query(LiveSession)
+                    .filter(
+                        LiveSession.shop_id == shop.id,
+                        LiveSession.connected_account_id == acc_obj.id,
+                    )
+                    .first()
+                )
+                if not existing_session:
                     db.add(
-                        ConnectedAccount(
+                        LiveSession(
                             shop_id=shop.id,
-                            platform=SourcePlatform.FACEBOOK_PAGE.value,
-                            external_id=pid,
-                            name=pname,
-                            encrypted_access_token=encrypted_tok,
-                            connection_status=ConnectionStatus.CONNECTED.value,
-                            granted_permissions=perms_str,
+                            connected_account_id=acc_obj.id,
+                            external_video_id=f"live_{uuid.uuid4().hex[:8]}",
+                            title=f"Live {pname}",
+                            source_type=SourcePlatform.FACEBOOK_PAGE.value,
+                            connection_mode=ConnectionStatus.CONNECTED.value,
+                            status="ACTIVE",
                         )
                     )
 

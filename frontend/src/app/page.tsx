@@ -227,6 +227,11 @@ export default function ChotLiveApp() {
         setManualSessionId(sessData[0].id);
       }
       setConnectedAccounts(accData);
+      const firstFbPage = accData.find((a: any) => a.platform === "FACEBOOK_PAGE");
+      if (firstFbPage) {
+        setNewSessionSource("FACEBOOK_PAGE");
+        setNewSessionConnectedAccountId((prev) => prev || firstFbPage.id);
+      }
       setMessages(msgData);
       setPrintJobs(prtData);
       setPrintSettings(pSetData);
@@ -431,24 +436,33 @@ export default function ChotLiveApp() {
 
   const handleCreateLiveSession = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token || !activeShop || !newSessionTitle.trim()) return;
+    if (!token || !activeShop) return;
+    const defaultFbAcc = connectedAccounts.find((a) => a.platform === "FACEBOOK_PAGE");
+    const chosenAccId =
+      newSessionSource === "FACEBOOK_PAGE"
+        ? newSessionConnectedAccountId || defaultFbAcc?.id
+        : undefined;
+    const sessionTitle =
+      newSessionTitle.trim() ||
+      `Phiên Live ${defaultFbAcc?.name || activeShop.name} (${new Date().toLocaleDateString("vi-VN")})`;
     try {
-      await apiFetch(
+      const created = await apiFetch(
         `/shops/${activeShop.id}/live-sessions`,
         {
           method: "POST",
           body: JSON.stringify({
-            title: newSessionTitle.trim(),
+            title: sessionTitle,
             source_type: newSessionSource,
             external_video_id: newSessionVideoId.trim() || undefined,
-            connected_account_id: newSessionConnectedAccountId || undefined,
+            connected_account_id: chosenAccId || undefined,
           }),
         },
         token
       );
       setNewSessionTitle("");
       setNewSessionVideoId("");
-      notify("Đã tạo phiên livestream mới!");
+      setManualSessionId(created.id);
+      notify(`Đã mở phiên livestream "${created.title}" thành công!`);
       await loadShopData();
     } catch (err: any) {
       notify(err.message);
@@ -457,15 +471,24 @@ export default function ChotLiveApp() {
 
   const handleConnectAccount = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token || !activeShop || !newAccName.trim() || !newAccExtId.trim()) return;
+    if (!token || !activeShop) return;
+    if (!newAccExtId.trim()) {
+      notify("Vui lòng nhập Page ID hoặc bấm nút Kết Nối Nhanh Facebook màu xanh ở trên!");
+      return;
+    }
+    const existingMatch = connectedAccounts.find(
+      (a) => a.external_id === newAccExtId.trim()
+    );
+    const resolvedName =
+      newAccName.trim() || existingMatch?.name || `Fanpage ${newAccExtId.trim()}`;
     try {
-      await apiFetch(
+      const savedAcc = await apiFetch(
         `/shops/${activeShop.id}/connected-accounts`,
         {
           method: "POST",
           body: JSON.stringify({
             platform: newAccPlatform,
-            name: newAccName.trim(),
+            name: resolvedName,
             external_id: newAccExtId.trim(),
             access_token: newAccToken.trim() || undefined,
           }),
@@ -475,7 +498,26 @@ export default function ChotLiveApp() {
       setNewAccName("");
       setNewAccExtId("");
       setNewAccToken("");
-      notify("Đã lưu cấu hình nguồn livestream!");
+      if (liveSessions.length === 0) {
+        const autoSession = await apiFetch(
+          `/shops/${activeShop.id}/live-sessions`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              title: `Live ${savedAcc.name}`,
+              source_type: savedAcc.platform,
+              connected_account_id: savedAcc.id,
+            }),
+          },
+          token
+        );
+        setManualSessionId(autoSession.id);
+        notify(
+          `Đã lưu nguồn "${savedAcc.name}" và tự động mở luôn phiên live "${autoSession.title}" cho bạn!`
+        );
+      } else {
+        notify(`Đã cập nhật nguồn kết nối "${savedAcc.name}" thành công!`);
+      }
       await loadShopData();
     } catch (err: any) {
       notify(err.message);
