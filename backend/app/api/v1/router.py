@@ -448,9 +448,7 @@ def get_shop_meta_oauth_url(
                 "mua app chỉ cần bấm nút này 1 lần là tự động kết nối Fanpage!"
             ),
         )
-    scopes = ",".join(
-        sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata", "pages_read_user_content"}))
-    )
+    scopes = ",".join(sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata"})))
     url = (
         f"https://www.facebook.com/{settings.META_API_VERSION}/dialog/oauth"
         f"?client_id={settings.META_APP_ID}"
