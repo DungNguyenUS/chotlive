@@ -35,6 +35,12 @@ describe("ChotLiveApp UI States (Login, Empty, Disconnected Error, Double-Click 
     render(<ChotLiveApp />);
     expect(screen.getByText("ChotLive Việt Nam")).toBeTruthy();
 
+    fireEvent.change(screen.getByTestId("login-email"), {
+      target: { value: "wrong@chotlive.vn" },
+    });
+    fireEvent.change(screen.getByTestId("login-password"), {
+      target: { value: "wrongpass" },
+    });
     fireEvent.click(screen.getByTestId("login-submit"));
 
     await waitFor(() => {

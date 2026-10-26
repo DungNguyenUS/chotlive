@@ -24,9 +24,9 @@ export default function ChotLiveApp() {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<any | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("owner@chotlive.vn");
-  const [password, setPassword] = useState("ChotLive@2026");
-  const [fullName, setFullName] = useState("Nguyễn Thu Hằng");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
 
@@ -150,7 +150,11 @@ export default function ChotLiveApp() {
       setHealthInfo(health);
       setMetaStatus(meta);
       if (shopList.length > 0) {
-        setActiveShop((prev: any) => prev || shopList[0]);
+        const savedShopId = window.localStorage.getItem("chotlive_active_shop_id");
+        const matchedShop = shopList.find((s: any) => s.id === savedShopId);
+        const chosenShop = matchedShop || shopList[0];
+        setActiveShop(chosenShop);
+        window.localStorage.setItem("chotlive_active_shop_id", chosenShop.id);
       } else {
         setShowCreateShopModal(true);
       }
@@ -300,6 +304,7 @@ export default function ChotLiveApp() {
       );
       setShops((prev) => [...prev, created]);
       setActiveShop(created);
+      window.localStorage.setItem("chotlive_active_shop_id", created.id);
       setShowCreateShopModal(false);
       setNewShopName("");
       notify(`Đã tạo cửa hàng "${created.name}" thành công!`);
@@ -687,8 +692,8 @@ export default function ChotLiveApp() {
               qua OAuth chính thức của Meta.
             </p>
             <p>
-              • Tài khoản mẫu Dev: <code>owner@chotlive.vn</code> /{" "}
-              <code>ChotLive@2026</code>
+              • Mọi dữ liệu Cửa hàng, Sản phẩm và Đơn hàng của bạn được lưu trữ
+              riêng biệt theo Email đăng nhập của bạn.
             </p>
           </div>
         </div>
@@ -721,12 +726,20 @@ export default function ChotLiveApp() {
           </div>
 
           <div className="flex items-center gap-2">
+            {user && (
+              <span className="hidden md:inline-block text-xs text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700">
+                👤 {user.email}
+              </span>
+            )}
             <select
               aria-label="Chọn cửa hàng"
               value={activeShop?.id || ""}
               onChange={(e) => {
                 const found = shops.find((s) => s.id === e.target.value);
-                if (found) setActiveShop(found);
+                if (found) {
+                  setActiveShop(found);
+                  window.localStorage.setItem("chotlive_active_shop_id", found.id);
+                }
               }}
               className="bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 border border-slate-700"
             >
@@ -741,12 +754,13 @@ export default function ChotLiveApp() {
               onClick={() => setShowCreateShopModal(true)}
               className="text-xs bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1.5 rounded-lg font-semibold"
             >
-              + Tạo Shop
+              + Thêm Chi Nhánh / Shop
             </button>
             <button
               type="button"
               onClick={() => {
                 window.localStorage.removeItem("chotlive_token");
+                window.localStorage.removeItem("chotlive_active_shop_id");
                 setToken(null);
                 setUser(null);
               }}
