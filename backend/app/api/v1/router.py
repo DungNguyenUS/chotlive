@@ -448,7 +448,9 @@ def get_shop_meta_oauth_url(
                 "mua app chỉ cần bấm nút này 1 lần là tự động kết nối Fanpage!"
             ),
         )
-    scopes = ",".join(sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata"})))
+    scopes = ",".join(
+        sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata", "pages_read_user_content"}))
+    )
     url = (
         f"https://www.facebook.com/{settings.META_API_VERSION}/dialog/oauth"
         f"?client_id={settings.META_APP_ID}"
@@ -896,18 +898,43 @@ def sync_facebook_comments_from_graph_api(
                     if lv_id and lv_id not in target_object_ids:
                         target_object_ids.insert(0, lv_id)
 
-            # 2. Check both /posts and /feed on the Page (latest 5 posts)
-            for edge in ("posts", "feed"):
+            # 2. Check published_posts, posts, and feed on the Page (latest 5 posts)
+            seen_comment_ids = set()
+            for edge in ("published_posts", "posts", "feed"):
                 feed_resp = client.get(
                     f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/{edge}",
-                    params={"fields": "id,message", "limit": 5},
+                    params={"fields": "id,message,comments.limit(50){id,message,created_time,from}", "limit": 5},
                     headers=headers,
                 )
+                if feed_resp.status_code != 200:
+                    # Retry without nested comments in case 'from' inside comments caused error
+                    feed_resp = client.get(
+                        f"https://graph.facebook.com/{settings.META_API_VERSION}/{conn_acc.external_id}/{edge}",
+                        params={"fields": "id,message", "limit": 5},
+                        headers=headers,
+                    )
                 if feed_resp.status_code == 200 and feed_resp.json().get("data"):
                     for post in feed_resp.json()["data"]:
                         post_id = str(post.get("id", "")).strip()
                         if post_id and post_id not in target_object_ids:
                             target_object_ids.append(post_id)
+                        nested_cmts = (post.get("comments") or {}).get("data", [])
+                        for c_item in nested_cmts:
+                            c_id = str(c_item.get("id", "")).strip()
+                            if c_id and c_id not in seen_comment_ids:
+                                seen_comment_ids.add(c_id)
+                                items.append(c_item)
+                elif feed_resp.status_code != 200:
+                    try:
+                        err_data = feed_resp.json().get("error", {})
+                        if err_data.get("message"):
+                            last_err_msg = (
+                                f"Token hiện tại thiếu quyền đọc bài viết/bình luận ({err_data.get('message')}). "
+                                "Mã tạo ở mục Messenger chỉ có quyền nhắn tin (pages_messaging), cần thêm quyền "
+                                "pages_read_engagement và pages_read_user_content!"
+                            )
+                    except Exception:
+                        pass
 
             if target_object_ids and (
                 not live_session.external_video_id or live_session.external_video_id.startswith("live_")
@@ -915,7 +942,6 @@ def sync_facebook_comments_from_graph_api(
                 live_session.external_video_id = target_object_ids[0]
 
             # 3. Fetch comments from discovered posts/live videos
-            seen_comment_ids = set()
             for obj_id in target_object_ids:
                 url = f"https://graph.facebook.com/{settings.META_API_VERSION}/{obj_id}/comments"
                 resp = client.get(url, params=params_with_from, headers=headers)
@@ -940,7 +966,7 @@ def sync_facebook_comments_from_graph_api(
             detail=f"Không thể kết nối tới Meta Graph API: {type(exc).__name__}",
         )
 
-    if not items and last_err_msg and not target_object_ids:
+    if not items and last_err_msg:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=last_err_msg)
     ingested_count = 0
     for item in items:
