@@ -118,13 +118,20 @@ export default function ChotLiveApp() {
     const urlParams = new URLSearchParams(window.location.search);
     const oauthStatus = urlParams.get("meta_oauth");
     const pagesCount = urlParams.get("pages_count");
+    const oauthReason = urlParams.get("reason");
     if (oauthStatus) {
       setActiveTab("sessions");
       if (oauthStatus === "success") {
         if (pagesCount === "0") {
-          notify(
-            "Đã đăng nhập FB nhưng chưa nhận được Fanpage! Hãy kiểm tra mục 'Chỉnh sửa quyền / Chọn Trang' trên cửa sổ Facebook hoặc cấp quyền pages_show_list trong Facebook Login for Business."
-          );
+          if (oauthReason === "app_role_not_accepted") {
+            notify(
+              "⚠️ Tài khoản FB vừa đăng nhập chưa bấm Chấp nhận (Accept) lời mời trên Meta App nên bị ẩn danh sách Fanpage! Hãy mở https://developers.facebook.com/requests/ bấm Accept, rồi bấm lại Kết Nối Nhanh Facebook."
+            );
+          } else {
+            notify(
+              "⚠️ Chưa tích chọn Fanpage trên cửa sổ Facebook (hoặc tài khoản FB chưa có Toàn quyền quản trị trên Trang). Hệ thống đã tự động reset phiên kết nối — hãy bấm lại 'Kết Nối Nhanh Facebook' và tích chọn Fanpage!"
+            );
+          }
         } else {
           notify(`🎉 Đã kết nối thành công ${pagesCount || ""} Fanpage từ Facebook!`);
         }
@@ -492,15 +499,18 @@ export default function ChotLiveApp() {
   const handleConnectAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token || !activeShop) return;
-    if (!newAccExtId.trim()) {
-      notify("Vui lòng nhập Page ID hoặc bấm nút Kết Nối Nhanh Facebook màu xanh ở trên!");
+    if (!newAccExtId.trim() && !newAccToken.trim()) {
+      notify("Vui lòng nhập Page ID / dán Access Token hoặc bấm nút Kết Nối Nhanh Facebook màu xanh ở trên!");
       return;
     }
+    const extIdPayload = newAccExtId.trim() || "auto";
     const existingMatch = connectedAccounts.find(
-      (a) => a.external_id === newAccExtId.trim()
+      (a) => a.external_id === extIdPayload
     );
     const resolvedName =
-      newAccName.trim() || existingMatch?.name || `Fanpage ${newAccExtId.trim()}`;
+      newAccName.trim() ||
+      existingMatch?.name ||
+      (newAccExtId.trim() ? `Fanpage ${newAccExtId.trim()}` : "Fanpage Facebook");
     try {
       const savedAcc = await apiFetch(
         `/shops/${activeShop.id}/connected-accounts`,
@@ -509,7 +519,7 @@ export default function ChotLiveApp() {
           body: JSON.stringify({
             platform: newAccPlatform,
             name: resolvedName,
-            external_id: newAccExtId.trim(),
+            external_id: extIdPayload,
             access_token: newAccToken.trim() || undefined,
           }),
         },
@@ -757,6 +767,17 @@ export default function ChotLiveApp() {
             <p>
               • Mọi dữ liệu Cửa hàng, Sản phẩm và Đơn hàng của bạn được lưu trữ
               riêng biệt theo Email đăng nhập của bạn.
+            </p>
+            <p className="pt-2 flex flex-wrap gap-3">
+              <a href="/privacy" className="underline hover:text-slate-700">
+                Chính sách quyền riêng tư
+              </a>
+              <a href="/terms" className="underline hover:text-slate-700">
+                Điều khoản dịch vụ
+              </a>
+              <a href="/data-deletion" className="underline hover:text-slate-700">
+                Hướng dẫn xóa dữ liệu
+              </a>
             </p>
           </div>
         </div>

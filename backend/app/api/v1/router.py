@@ -448,7 +448,8 @@ def get_shop_meta_oauth_url(
                 "mua app chỉ cần bấm nút này 1 lần là tự động kết nối Fanpage!"
             ),
         )
-    scopes = ",".join(sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata"})))
+    extra_scopes = {s.strip() for s in settings.META_OAUTH_EXTRA_SCOPES.split(",") if s.strip()}
+    scopes = ",".join(sorted(list(REQUIRED_PAGE_PERMISSIONS | {"pages_manage_metadata"} | extra_scopes)))
     url = (
         f"https://www.facebook.com/{settings.META_API_VERSION}/dialog/oauth"
         f"?client_id={settings.META_APP_ID}"
@@ -501,12 +502,94 @@ def handle_meta_oauth_callback(
             # Fetch all Fanpages managed by this customer
             pages_resp = client.get(
                 f"https://graph.facebook.com/{settings.META_API_VERSION}/me/accounts",
-                params={"fields": "id,name,access_token,tasks", "access_token": user_access_token},
+                params={"fields": "id,name,access_token,tasks", "limit": 100, "access_token": user_access_token},
             )
             if pages_resp.status_code != 200:
                 return RedirectResponse(url=f"{settings.FRONTEND_URL}?meta_oauth=fetch_pages_failed")
 
-            pages_data = pages_resp.json().get("data", [])
+            pages_data = list(pages_resp.json().get("data", []))
+            known_pids = {str(p.get("id", "")) for p in pages_data if p.get("id")}
+
+            # Also inspect /debug_token granular_scopes (catches New Pages Experience / Business Portfolio Pages
+            # that do not appear in /me/accounts without business_management scope)
+            granted_scopes: set[str] = set()
+            granular_target_ids: list[str] = []
+            try:
+                app_token = f"{settings.META_APP_ID}|{settings.META_APP_SECRET}"
+                dbg_resp = client.get(
+                    f"https://graph.facebook.com/{settings.META_API_VERSION}/debug_token",
+                    params={"input_token": user_access_token, "access_token": app_token},
+                )
+                if dbg_resp.status_code == 200:
+                    dbg_data = dbg_resp.json().get("data", {})
+                    granted_scopes = set(dbg_data.get("scopes") or [])
+                    for gs in dbg_data.get("granular_scopes") or []:
+                        for tid in gs.get("target_ids") or []:
+                            tid_str = str(tid).strip()
+                            if tid_str and tid_str not in granular_target_ids:
+                                granular_target_ids.append(tid_str)
+            except Exception:
+                pass
+
+            for tid in granular_target_ids:
+                if tid in known_pids:
+                    continue
+                try:
+                    p_resp = client.get(
+                        f"https://graph.facebook.com/{settings.META_API_VERSION}/{tid}",
+                        params={"fields": "id,name,access_token", "access_token": user_access_token},
+                    )
+                    if p_resp.status_code != 200:
+                        p_resp = client.get(
+                            f"https://graph.facebook.com/{settings.META_API_VERSION}/{tid}",
+                            params={"fields": "id,name", "access_token": user_access_token},
+                        )
+                    if p_resp.status_code == 200:
+                        p_info = p_resp.json()
+                        if p_info.get("id"):
+                            pages_data.append(
+                                {
+                                    "id": str(p_info["id"]),
+                                    "name": p_info.get("name") or f"Fanpage {p_info['id']}",
+                                    "access_token": p_info.get("access_token") or user_access_token,
+                                }
+                            )
+                            known_pids.add(str(p_info["id"]))
+                except Exception:
+                    pass
+
+            if not pages_data:
+                if not granted_scopes:
+                    try:
+                        perm_resp = client.get(
+                            f"https://graph.facebook.com/{settings.META_API_VERSION}/me/permissions",
+                            params={"access_token": user_access_token},
+                        )
+                        if perm_resp.status_code == 200:
+                            granted_scopes = {
+                                item.get("permission")
+                                for item in perm_resp.json().get("data", [])
+                                if item.get("status") == "granted" and item.get("permission")
+                            }
+                    except Exception:
+                        pass
+
+                empty_reason = (
+                    "app_role_not_accepted"
+                    if "pages_show_list" not in granted_scopes
+                    else "no_page_selected"
+                )
+                # Revoke the 0-page OAuth grant on Facebook so the next click forces the Page selection popup again
+                try:
+                    client.delete(
+                        f"https://graph.facebook.com/{settings.META_API_VERSION}/me/permissions",
+                        params={"access_token": user_access_token},
+                    )
+                except Exception:
+                    pass
+                return RedirectResponse(
+                    url=f"{settings.FRONTEND_URL}?meta_oauth=success&pages_count=0&reason={empty_reason}"
+                )
             for p in pages_data:
                 pid = str(p.get("id", ""))
                 pname = p.get("name") or f"Fanpage {pid}"
@@ -616,6 +699,66 @@ def connect_account(
         shop_id, current_user, db, required_roles=[ShopRole.OWNER.value, ShopRole.ADMIN.value]
     )
 
+    resolved_ext_id = req.external_id.strip()
+    resolved_name = req.name.strip()
+    resolved_token = req.access_token.strip() if req.access_token else None
+
+    # Auto-discover Fanpage ID, Name, and Page Access Token when a real Meta token (EAA...) is provided
+    if (
+        req.platform == SourcePlatform.FACEBOOK_PAGE.value
+        and resolved_token
+        and resolved_token.startswith("EAA")
+    ):
+        import httpx
+
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                # 1. Check if the pasted token is a User Access Token that manages Fanpages
+                pages_resp = client.get(
+                    f"https://graph.facebook.com/{settings.META_API_VERSION}/me/accounts",
+                    params={"fields": "id,name,access_token", "limit": 100, "access_token": resolved_token},
+                )
+                pages_list = (
+                    pages_resp.json().get("data", []) if pages_resp.status_code == 200 else []
+                )
+                if pages_list:
+                    matched_page = next(
+                        (p for p in pages_list if str(p.get("id")) == resolved_ext_id),
+                        pages_list[0],
+                    )
+                    if matched_page.get("id"):
+                        resolved_ext_id = str(matched_page["id"])
+                    if matched_page.get("name"):
+                        resolved_name = str(matched_page["name"])
+                    if matched_page.get("access_token"):
+                        resolved_token = str(matched_page["access_token"])
+                else:
+                    # 2. Check if the pasted token is already a Page Access Token (or User Token with known Page ID)
+                    target_node = (
+                        resolved_ext_id
+                        if resolved_ext_id and resolved_ext_id != "auto"
+                        else "me"
+                    )
+                    me_resp = client.get(
+                        f"https://graph.facebook.com/{settings.META_API_VERSION}/{target_node}",
+                        params={"fields": "id,name,access_token", "access_token": resolved_token},
+                    )
+                    if me_resp.status_code != 200:
+                        me_resp = client.get(
+                            f"https://graph.facebook.com/{settings.META_API_VERSION}/{target_node}",
+                            params={"fields": "id,name", "access_token": resolved_token},
+                        )
+                    if me_resp.status_code == 200:
+                        me_data = me_resp.json()
+                        if me_data.get("id"):
+                            resolved_ext_id = str(me_data["id"])
+                        if me_data.get("name"):
+                            resolved_name = str(me_data["name"])
+                        if me_data.get("access_token"):
+                            resolved_token = str(me_data["access_token"])
+        except Exception:
+            pass
+
     granted = set(req.granted_permissions or [])
     missing = sorted(list(REQUIRED_PAGE_PERMISSIONS - granted)) if req.platform == SourcePlatform.FACEBOOK_PAGE.value else []
 
@@ -632,10 +775,10 @@ def connect_account(
         last_error = None
     else:
         # FACEBOOK_PAGE
-        if req.access_token and not req.granted_permissions:
+        if resolved_token and not req.granted_permissions:
             granted = set(REQUIRED_PAGE_PERMISSIONS)
             missing = []
-        if not settings.has_real_meta_credentials and not req.access_token:
+        if not settings.has_real_meta_credentials and not resolved_token:
             conn_status = ConnectionStatus.MISSING_CREDENTIALS.value
             last_error = "Chưa cấu hình META_APP_ID / META_APP_SECRET hoặc chưa cấp Page Access Token."
         elif missing:
@@ -645,19 +788,19 @@ def connect_account(
             conn_status = ConnectionStatus.CONNECTED.value
             last_error = None
 
-    encrypted_token = encrypt_secret(req.access_token) if req.access_token else None
+    encrypted_token = encrypt_secret(resolved_token) if resolved_token else None
 
     existing = (
         db.query(ConnectedAccount)
         .filter(
             ConnectedAccount.shop_id == shop.id,
             ConnectedAccount.platform == req.platform,
-            ConnectedAccount.external_id == req.external_id,
+            ConnectedAccount.external_id == resolved_ext_id,
         )
         .first()
     )
     if existing:
-        existing.name = req.name
+        existing.name = resolved_name
         existing.connection_status = conn_status
         existing.encrypted_access_token = encrypted_token
         existing.granted_permissions = ",".join(sorted(list(granted))) if granted else None
@@ -668,8 +811,8 @@ def connect_account(
         acc = ConnectedAccount(
             shop_id=shop.id,
             platform=req.platform,
-            external_id=req.external_id,
-            name=req.name,
+            external_id=resolved_ext_id,
+            name=resolved_name,
             connection_status=conn_status,
             encrypted_access_token=encrypted_token,
             granted_permissions=",".join(sorted(list(granted))) if granted else None,

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     META_REDIRECT_URI: str = "http://localhost:8000/api/v1/meta/oauth/callback"
     META_API_VERSION: str = "v21.0"
     META_WEBHOOK_VERIFY_TOKEN: str = "chotlive_dev_verify_token"
+    # Extra OAuth scopes (comma-separated), e.g. "pages_read_user_content" once it is added in the Meta App dashboard
+    META_OAUTH_EXTRA_SCOPES: str = ""
     ALLOW_MOCK_META_IN_DEV: bool = True
 
     PRINT_BRIDGE_URL: str = "http://127.0.0.1:9100"
